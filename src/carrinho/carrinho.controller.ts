@@ -1,9 +1,11 @@
-// Corrigindo nomes de interfaces e implementando métodos básicos
+import { Request, Response } from "express";
+import { ObjectId } from "bson";
+import { db } from "../database/banco-mongo.js";
 
 interface ItemCarrinho {
     produtoId: string;
     quantidade: number;
-    precoUnico: number;
+    precoUnitario: number;
     nome: string;
 }
 
@@ -14,74 +16,227 @@ interface Carrinho {
     total: number;
 }
 
+interface Produto {
+    _id: ObjectId;
+    nome: string;
+    preco: number;
+    descricao: string;
+    urlfoto: string;
+}
+
 class CarrinhoController {
-    private carrinhos: Carrinho[] = [];
-
-    // Adicionar item ao carrinho
-    adicionarItem(usuarioId: string, item: ItemCarrinho): Carrinho {
-        let carrinho = this.carrinhos.find(c => c.usuarioId = usuarioId);
-        if (!carrinho) {
-            carrinho = {
-                usuarioId,
-                itens: [],
-                dataAtualizacao: new Date(),
-                total: 0
+    async adicionarItem(req: Request, res: Response) {
+        try {
+            const { usuarioId, produtoId, quantidade } = req.body as {
+                usuarioId: string;
+                produtoId: string;
+                quantidade: number;
             };
-            this.carrinhos.push(carrinho);
-        }
-        const existente = carrinho.itens.find(i => i.produtoId = item.produtoId);
-        if (existente) {
-            existente.quantidade += item.quantidade;
-        } else {
-            carrinho.itens.push(item);
-        }
-        carrinho.dataAtualizacao = new Date();
-        carrinho.total = this.calcularTotal(carrinho.itens);
-        return carrinho;
-    }
+            console.log(usuarioId, produtoId, quantidade);
 
-    // Remover item do carrinho
-    removerItem(usuarioId: string, produtoId: string): Carrinho | undefined {
-        const carrinho = this.carrinhos.find(c => c.usuarioId = usuarioId);
-        if (!carrinho) return undefined;
-        carrinho.itens = carrinho.itens.filter(i => i.produtoId != produtoId);
-        carrinho.dataAtualizacao = new Date();
-        carrinho.total = this.calcularTotal(carrinho.itens);
-        return carrinho;
-    }
+            if (!usuarioId || !produtoId || quantidade <= 0)
+                return res.status(400).json({ mensagem: "Dados inválidos" });
+            const produto = await db
+                .collection<Produto>("produtos")
+                .findOne({ _id: ObjectId.createFromHexString(produtoId) });
+            if (!produto)
+                return res.status(404).json({ mensagem: "Produto não encontrado" });
 
-    // Atualizar quantidade do item no carrinho
-    atualizarQuantidade(usuarioId: string, produtoId: string, quantidade: number): Carrinho | undefined {
-        const carrinho = this.carrinhos.find(c => c.usuarioId = usuarioId);
-        if (!carrinho) return undefined;
-        const item = carrinho.itens.find(i => i.produtoId = produtoId);
-        if (item) {
-            item.quantidade = quantidade;
+            const nomeProduto = produto.nome;
+            const precoProduto = produto.preco;
+            const carrinho = await db
+                .collection<Carrinho>("carrinhos")
+                .findOne({ usuarioId });
+
+            if (!carrinho) {
+                const novoCarrinho: Carrinho = {
+                    usuarioId,
+                    itens: [
+                        {
+                            produtoId,
+                            quantidade,
+                            precoUnitario: precoProduto,
+                            nome: nomeProduto,
+                        },
+                    ],
+                    dataAtualizacao: new Date(),
+                    total: precoProduto * quantidade,
+                };
+                const resposta = await db
+                    .collection<Carrinho>("carrinhos")
+                    .insertOne(novoCarrinho);
+
+                return res.status(201).json({
+                    ...novoCarrinho,
+                    _id: resposta.insertedId,
+                });
+            }
+            const itemExistente = carrinho.itens.find(
+                (item) => item.produtoId === produtoId
+            );
+
+            if (itemExistente) {
+                itemExistente.quantidade += quantidade;
+            } else {
+                carrinho.itens.push({
+                    produtoId,
+                    quantidade,
+                    precoUnitario: precoProduto,
+                    nome: nomeProduto,
+                });
+            }
+
+            carrinho.total += precoProduto * quantidade;
             carrinho.dataAtualizacao = new Date();
-            carrinho.total = this.calcularTotal(carrinho.itens);
+
+            await db.collection<Carrinho>("carrinhos").updateOne(
+                { usuarioId },
+                {
+                    $set: {
+                        itens: carrinho.itens,
+                        total: carrinho.total,
+                        dataAtualizacao: carrinho.dataAtualizacao,
+                    },
+                }
+            );
+
+            res.status(200).json(carrinho);
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ mensagem: "Erro ao adicionar item" });
         }
-        return carrinho;
     }
+    async removerItem(req: Request, res: Response) {
+        try {
+            const { usuarioId, produtoId } = req.params;
 
-    // Listar itens do carrinho
-    listarItens(usuarioId: string): ItemCarrinho[] {
-        const carrinho = this.carrinhos.find(c => c.usuarioId = usuarioId);
-        return carrinho ? carrinho.itens : [];
-    }
+            const carrinho = await db
+                .collection<Carrinho>("carrinhos")
+                .findOne({ usuarioId });
+            if (!carrinho)
+                return res.status(404).json({ mensagem: "Carrinho não encontrado" });
 
-    // Remover carrinho
-    removerCarrinho(usuarioId: string): boolean {
-        const index = this.carrinhos.findIndex(c => c.usuarioId = usuarioId);
-        if (index !== -1) {
-            this.carrinhos.splice(index, 1);
-            return true;
+            const item = carrinho.itens.find(
+                (i) => i.produtoId === produtoId
+            );
+            if (!item)
+                return res
+                    .status(404)
+                    .json({ mensagem: "Produto não encontrado no carrinho" });
+            carrinho.itens = carrinho.itens.filter(
+                (i) => i.produtoId !== produtoId
+            );
+            carrinho.total = carrinho.itens.reduce(
+                (acc, i) => acc + i.precoUnitario * i.quantidade,
+                0
+            );
+            carrinho.dataAtualizacao = new Date();
+
+            await db.collection<Carrinho>("carrinhos").updateOne(
+                { usuarioId },
+                { $set: carrinho }
+            );
+
+            res.status(200).json({ mensagem: "Item removido com sucesso", carrinho });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ mensagem: "Erro ao remover item" });
         }
-        return false;
+    }
+    async atualizarQuantidade(req: Request, res: Response) {
+        try {
+            const { usuarioId, produtoId, novaQuantidade } = req.body as {
+                usuarioId: string;
+                produtoId: string;
+                novaQuantidade: number;
+            };
+
+            if (!usuarioId || !produtoId || novaQuantidade < 0)
+                return res.status(400).json({ mensagem: "Dados inválidos" });
+
+            const carrinho = await db
+                .collection<Carrinho>("carrinhos")
+                .findOne({ usuarioId });
+            if (!carrinho)
+                return res.status(404).json({ mensagem: "Carrinho não encontrado" });
+
+            const item = carrinho.itens.find(
+                (i) => i.produtoId === produtoId
+            );
+            if (!item)
+                return res
+                    .status(404)
+                    .json({ mensagem: "Produto não encontrado no carrinho" });
+
+            if (novaQuantidade === 0) {
+                carrinho.itens = carrinho.itens.filter(
+                    (i) => i.produtoId !== produtoId
+                );
+            } else {
+                item.quantidade = novaQuantidade;
+            }
+
+            carrinho.total = carrinho.itens.reduce(
+                (acc, i) => acc + i.precoUnitario * i.quantidade,
+                0
+            );
+            carrinho.dataAtualizacao = new Date();
+
+            await db.collection<Carrinho>("carrinhos").updateOne(
+                { usuarioId },
+                { $set: carrinho }
+            );
+
+            res.status(200).json(carrinho);
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ mensagem: "Erro ao atualizar quantidade" });
+        }
     }
 
-    // Calcular total do carrinho
-    private calcularTotal(itens: ItemCarrinho[]): number {
-        return itens.reduce((total, item) => total + item.precoUnico * item.quantidade, 0);
+    async listar(req: Request, res: Response) {
+        try {
+            const { usuarioId } = req.params;
+
+            if (!usuarioId)
+                return res.status(400).json({ mensagem: "Usuário inválido" });
+
+            const carrinho = await db
+                .collection<Carrinho>("carrinhos")
+                .findOne({ usuarioId });
+
+            if (!carrinho)
+                return res
+                    .status(404)
+                    .json({ mensagem: "Carrinho não encontrado" });
+
+            res.status(200).json(carrinho);
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ mensagem: "Erro ao listar carrinho" });
+        }
+    }
+    async remover(req: Request, res: Response) {
+        try {
+            const { usuarioId } = req.params;
+
+            if (!usuarioId)
+                return res.status(400).json({ mensagem: "Usuário inválido" });
+
+            const resultado = await db
+                .collection<Carrinho>("carrinhos")
+                .deleteOne({ usuarioId });
+
+            if (resultado.deletedCount === 0)
+                return res
+                    .status(404)
+                    .json({ mensagem: "Carrinho não encontrado" });
+
+            res.status(200).json({ mensagem: "Carrinho removido com sucesso" });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ mensagem: "Erro ao remover carrinho" });
+        }
     }
 }
 
